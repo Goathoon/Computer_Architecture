@@ -82,6 +82,7 @@ for(int i = 0; i<8; i++)
 2. 첫번째 인자에는 실행시킬 instruction들의 수
 3. 두번째 인자에는 instruction 확장자인 binary 파일 이름
 4. optional 인자로, data memory의 값들을 저장시킨 data 파일 (시작 주소는 0x10000000 임에 유의)
+5. unknown instruction이 주어지면, PC+4의 unknown instruction 을 실행시키고 종료시킬것.
 
 ### SUMMARY
 
@@ -182,3 +183,464 @@ N개의 instruction을 수행하는 과정에서는 PC register와 동일한 역
 그렇지 않은 경우에는 1차과제와 마찬가지로, 해당 instruction에 맞게끔 각각 opcode, shamt, immediate value 등과 같은 값들을 Instruction 구조체를 이용하여 저장시킨다. <br/>
 저장된 구조체를 이용하여 register value 혹은 memory value들을 바꾸는 알고리즘을 적용시켰다.
 
+## 3차과제
+
+**목표 : 2차 과제까지 구현했던 결과물에 cache behavior를 추가하기**
+
+1. 마지막 instruction 이후에, 전체 cache hit과 miss된 숫자를 출력해야 한다.
+2. instruction cache 는 고려하지 않고, 오직 data cache만 고려한다. (lw, sw Instruction만 고려)
+3. Cache에는 두가지 종류가 있다. 
+
+|캐시|용량|캐쉬 구조|Write policy|주소 bit|block size|
+|---|---|---|---|---|---|
+|Cache 1|1KB|Direct-mapped|Write-through & no write allocate|32bit 주소|block size는 변수로, command line에서 input|
+|Cache 2|4KB|2-Way set associative, LRU replacement|Write-back & write allocate| 32bit 주소|block size는 변수로, command line에서 input|
+
+4. input은 첫번째에는 Cache type, 두번째에는 block size, 세번째에는 2차과제 input을 순서대로 받는다.<br/>
+예시) ./mips-sim 2 16 100 test1.inst test1.data (여기서 16은 byte로써, 4words 를 의미한다)
+
+5. 유효한 block size 제한<br/>
+- block size는 무조건 word size인 4바이트보다 크다.
+- block size는 Cache capacity / Set Associative 보다 작거나 같다.
+- block size는 항상 order of 2 이다.
+- 여기서 invalid 한 cache size input에 대한 에러 처리는 안해도 무방. (항상 valid한 input만 받는다고 가정)
+
+6. output 양식
+```c
+Instructions: 222
+Total: 14
+Hits: 10
+Misses: 4
+```
+
+### SUMMARY
+hit 구조체를 추가로 선언.
+hit 정보를 나타내기위한 구조체로써,
+총 instruction 수, cache hit의 수, miss 된 수를 저장함.
+```c
+typedef struct _Hit //Hit 정보 나타내기 위한 struct
+{
+    int instN;
+    int hitN;
+    int missN;
+}Hit;
+```
+그리고, cache 구현을 위한 cache 배열을 두개 선언했다. <br/>
+cache1 의 첫번째 열에는 'valid bit', 두번째 열에는 'tag bit'이 들어간다.<br/>
+cache2 의 첫번째 열에는 'LRU', 두번째 열에는 valid bit', 세번째 열에는 'dirty bit', 네번째 열에는 'tag'가 들어간다.<br/>
+```c
+unsigned int cache1[1024][2];
+unsigned int cache2[4096][4];
+```
+
+
+
+
+2차과제에서 추가된 main 함수속 while문을 보면서 어떻게 구현했는지 설명하겠다.
+```c
+while (1) // Instruction 수행의 단계
+    {
+
+        if(hit.instN==N)
+        {
+
+            PrintHit(&hit);
+            break;
+        }
+        else
+        {
+            if(divided_current_address >=1) //이부분은 예외처리 부분임. (unknown instruction 주어질 때 종료, 신경 안써도 된다)
+            {
+
+                if (inst_memory[divided_current_address - 1][1] == UINT_MAX)
+                {
+                    PrintHit(&hit);
+                    break;
+                }
+            }
+        }
+
+        if(inst_memory[divided_current_address][1]/(1<<26)==0) //R-type
+        {
+            registers[32][1] +=4;
+            R2inst(inst_memory[divided_current_address ][1] , Inst);
+        }
+
+        else
+        {
+            registers[32][1] +=4;
+            if(inst_memory[divided_current_address ][1]/(1<<26) ==3) //jal일경우
+            {
+                registers[31][1] = (divided_current_address +1)*4; //$ra에 저장 (PC+4)./m
+            }
+
+            IJ2inst(inst_memory[divided_current_address][1], Inst, block_size, type,&hit);
+        }
+        hit.instN++;
+        divided_current_address = registers[32][1]/4;
+    }
+```
+
+while문을 무한히 반복하면서 instruction 하나를 읽을 때 마다 hit.instN 을 1씩 증가시킨다.<br/>
+그러다가, instN이 command로 입력받은 instruction 수와 같아질 때, cache hit 과 cache miss를 출력하면서 프로그램을 종료한다. <br/>
+2차과제와 달라지는 점이 거의 없다. <br/>
+**하지만 추가된 함수가 두가지 있다.**
+
+>추가된 함수를 설명하기 전에, block address의 구조에 대해 짚고 넘어가자. <br/>
+기본적인 block address 의 구조는 다음과 같다. <br/>
+**TAG - INDEX - OFFSET** 으로 구성된다. <br/>
+offset은 block size에 의해 정해진다. (log2( words/block * 4)) <br/>
+index는 block 수에 의해 정해진다. (Cache capacity / bytes of block)<br/>
+tag는 나머지 bit를 차지한다. <br/>
+```c
+void Iinst2reg_Cache1(Instruction *inst,int block_size, unsigned int d[][2],Hit *hit);
+void Iinst2reg_Cache2(Instruction *inst,int block_size, unsigned int d[][2],Hit *hit);
+```
+각각은 cache1과 cache2를 구현하기 위한 함수이다. <br/>
+cache1 부터 살펴보자.
+
+### - Cache 1
+
+```c
+void Iinst2reg_Cache1(Instruction *inst,int block_size, unsigned int d[][2],Hit *hit)
+{
+    // cache배열의 첫번째 열은 valid bit 두번째 열은 tag bits
+    unsigned int cache_address = (inst->offset) + d[inst->rs][1]; //내가 load 하고싶은 위치의 주소.
+    // 1024000/blocksize 는 총 블록의 개수.
+    // log2(block num) = index address
+    // log2(blocksize) = offset 부분
+    unsigned int offsetBits = log2(block_size); 
+    unsigned int blockaddress = cache_address / (1 << offsetBits);
+    unsigned int indexBits = log2(1024 / block_size);
+    unsigned int index = blockaddress % (1 << indexBits);
+    unsigned int tag = blockaddress / (1 << indexBits);
+    if(!strcmp(inst->op, "lw"))
+    {
+        if(cache1[index][0] == 1 ) //valid bit이 1이면 hit을 만족하기 위한 전제조건 완성.
+        {
+            if(cache1[index][1] == tag) //hit이 발생
+            {
+                hit->hitN ++;
+            }
+            else
+            {
+                hit->missN ++;
+                cache1[index][0] = 1;
+                cache1[index][1] = tag;
+            }
+        }
+        else //valid하지 않을때
+        {
+            hit->missN++;
+            cache1[index][0] = 1;
+            cache1[index][1] = tag;
+        }
+    }
+    else if(!strcmp(inst->op,"sw"))
+    {
+        if(cache1[index][0] == 1 ) //valid bit이 1이면 hit을 만족하기 위한 전제조건 완성.
+        {
+            if(cache1[index][1] == tag) //hit이 발생 ->cache memory상에도 data값의 변화가 존재는 하지만 여기선 굳이 표현할 필요x
+            {
+                hit->hitN ++;
+            }
+            else
+            {
+                hit->missN ++;
+                //아무것도 하지 않아도 됩니다. (memory의 값을 바꾸는 함수가 이미 선행되었기 떄문)
+            }
+        }
+        else //valid하지 않을때
+        {
+            hit->missN++;
+            //마찬가지
+        }
+    }
+}
+```
+
+
+먼저 load하고자 하는 cache의 주소에 접근하기 위해, **instruction의 offset 부분**과 lw든 sw든 **rs**부분이 곧 dst 와 src가 되므로, 해당 **rs부분과 offset을 더하여** cache address를 구한다.<br/>
+그 후, 인자로 넘겨받은 block size를 이용해 offset bits를 계산하고, block address, index bits등 구현에 필요한 부분을 다 구해놓고 시작한다.<br/>
+여기서 lw 와 sw 만 고려하면 되므로, strcmp로 instruction의 op 부분이 lw인지 ,sw인지 확인후, 각각에 맞는 실행방식을 구현하였다. <br/>
+cache1의 첫번째 열은 valid bit이므로, valid bit이 1 이면 hit이, 아니면 miss이다. miss 일 경우, 해당 cache address를 valid하게 바꾸고, cache에 해당 정보를 load시켜야 할 것이다. <br/>
+valid bit이 1이더라도, tag가 다르면, 다른 block이므로 miss할때와 마찬가지로 cache memory를 갱신한다. <br/>
+이 때, lw와 sw로 바뀐 register와 memory의 상태는 Iinst2reg_Mem 함수로 이미 구현한 상태이므로, 신경쓰지 않아도 무방하다.
+```c
+void Iinst2reg_Mem(Instruction *inst,unsigned int d[][2], unsigned int arr[][2]) //inst, regis, data_memory 순의 arguement
+{
+    if(!strcmp(inst->op, "lw"))
+    {
+        int num1=0;
+        for(int i = 0; i<65536; i++)
+        {
+            if(inst->offset + d[inst->rs][1] == arr[i][0])
+            {
+                num1 = i; //찾는 주소값이 있있는 가로 index 탐색.
+                break;
+            }
+        }
+        d[inst->rt][1] = 0;
+        for(int j = 0; j<4; j++)
+        {
+            d[inst->rt][1] += arr[num1++][1] <<4*(6-2*j);
+        }
+        
+
+    }
+    else if(!strcmp(inst->op, "sw"))
+    {
+        int num2=0;
+        for (int i = 0; i < 65536; i++)
+        {
+            if (inst->offset + d[inst->rs][1] == arr[i][0])
+            {
+                num2 = i; //찾는 주소값이 있있는 가로 index 탐색.
+                break;
+            }
+        }
+        arr[num2++][1] = d[inst->rt][1]/(1<<24);
+        arr[num2++][1] = (d[inst->rt][1]%(1<<24))/(1<<16);
+        arr[num2++][1] = (d[inst->rt][1]%(1<<16))/(1<<8);
+        arr[num2++][1] = (d[inst->rt][1]%(1<<8));
+    }
+}
+
+//다음과 같이 구현함 (예시만 가져왔음)
+case 35:
+            strcpy(inst->op,"lw");
+            I2branch(reg,inst); 
+            if(type==1)
+                Iinst2reg_Cache1(inst,blocksize,registers, hit);
+            else
+                Iinst2reg_Cache2(inst,blocksize,registers, hit);
+            Iinst2reg_Mem(inst, registers, data_memory); // load data 한 후에 miss,
+            break;
+```
+
+### - Cache 2
+
+```c
+void Iinst2reg_Cache2(Instruction *inst,int block_size, unsigned int d[][2],Hit *hit)
+{
+    //cache2배열의 열의 순서는 순서대로 1-LRU 2-VALID 3-DIRTY 4=-TAG
+    unsigned int cache_address = inst->offset + d[inst->rs][1]; //내가 load 하고싶은 위치의 주소.
+    // 1024000/blocksize 는 총 블록의 개수.
+    // log2(block num) = index address
+    // log2(blocksize) = offset 부분
+    unsigned int offsetBits = log2(block_size); //6
+    unsigned int blockaddress = cache_address / (1 << offsetBits);
+    unsigned int indexBits = log2(4096 / block_size/2); //수정해야할수도있는부분
+    unsigned int index = blockaddress % (1 << indexBits);
+    unsigned int tag = blockaddress / (1 << indexBits);
+    if(!strcmp(inst->op, "sw"))
+    {
+
+        if(cache2[2*index][1] ==1 && cache2[2*index+1][1] ==1) //한 set내 두 cache line이 valid한 경우
+        {
+            if(cache2[2*index][3] == tag)
+            {
+               hit->hitN++;
+               cache2[2*index+1][0] = 1;
+               cache2[2*index][0] = 1;
+            }
+            else if(cache2[2*index+1][3] == tag)
+            {
+               hit->hitN++;
+               cache2[2*index+1][0] = 0;
+               cache2[2*index][0] = 0;
+            }
+            else //miss 가 발생한 경우
+            {
+                hit->missN++;
+                cache2[2*index+cache2[2*index][0]][2] = 1; //해당 LRU에 해당하는 것을 replace하기위해 해당 index cache line을 dirty bit으로 교체  
+                cache2[2*index+cache2[2*index][0]][3] = tag; //tag replacement 해당 lru. data는 신경x
+                if(cache2[2*index][0] ==0) //lru가 0인경우 1로 변화
+                {
+                    cache2[2*index][0] = 1;
+                    cache2[2*index+1][0] = 1;
+                }
+                else
+                {
+                    cache2[2*index][0] = 0;
+                    cache2[2*index+1][0] = 0;
+                }
+
+            }
+    
+
+        }
+        else if(cache2[2*index][1] ==1)//둘중하나만 valid한 경우 그중 첫번째가 valid (내가 이렇게 설정함. 무조건 첫번쨰거먼저 replace)
+        {
+            if(cache2[2*index][3]==tag)
+            {
+               hit->hitN++;
+               cache2[2*index+1][0] = 1;
+               cache2[2*index][0] = 1;
+            }
+            else //valid하지 않은 cacheline에 memory 저장
+            {
+                hit->missN++;
+                cache2[2*index+1][1] = 1;
+                cache2[2*index+1][2] = 1;
+                cache2[2*index+1][3] = tag;
+                cache2[2*index][0] = 0; //lru 변화
+                cache2[2*index+1][0] = 0; //lru변화
+            }
+        }
+        else//둘다 invalid
+        {
+            hit->missN++;
+            cache2[2*index][0] = 1;
+            cache2[2*index+1][0] = 1;
+            cache2[2*index][1] = 1; //valid하게 바꿈
+            cache2[2*index][2] = 1; //dirty bit
+            cache2[2*index][3] = tag;
+        }
+        
+    }
+    else if(!strcmp(inst->op,"lw"))
+    {
+        if(cache2[2*index][1] ==1 && cache2[2*index+1][1] ==1) //한 set내 두 cache line이 valid한 경우
+        {
+            if(cache2[2*index][3] == tag)
+            {
+               hit->hitN++;
+               cache2[2*index+1][0] = 1;
+               cache2[2*index][0] = 1;
+            }
+            else if(cache2[2*index+1][3] == tag)
+            {
+                hit->hitN++;
+                cache2[2 * index + 1][0] = 0;
+                cache2[2 * index][0] = 0;
+            }
+            else
+            {
+                hit->missN++;
+                cache2[2*index+cache2[2*index][0]][3] = tag; //tag replacement 해당 lru. data는 신경x
+                if(cache2[2*index][0] ==0) //lru가 0인경우 1로 변화
+                {
+                    cache2[2*index][0] = 1;
+                    cache2[2*index+1][0] = 1;
+                }
+                else
+                {
+                    cache2[2*index][0] = 0;
+                    cache2[2*index+1][0] = 0;
+                }
+            }
+
+        }
+        else if(cache2[2*index][1] ==1)//둘중하나만 valid한 경우 그중 첫번째가 valid (내가 이렇게 설정함. 무조건 첫번쨰거먼저 replace)
+        {
+            if(cache2[2*index][3]==tag)
+            {
+                hit->hitN++;
+                cache2[2 * index + 1][0] = 1;
+                cache2[2 * index][0] = 1;
+            }
+            else //valid하지 않은 cacheline에 memory 저장
+            {
+                hit->missN++;
+                cache2[2*index+1][1] = 1;
+                cache2[2*index+1][3] = tag;
+                cache2[2*index][0] = 0; //lru 변화
+                cache2[2*index+1][0] = 0; //lru변화
+            }
+        }
+        else
+        {
+            hit->missN++;
+            cache2[2*index][0] = 1;
+            cache2[2*index+1][0] = 1;
+            cache2[2*index][1] = 1; //valid하게 바꿈
+            cache2[2*index][3] = tag;
+        }
+    }
+}
+
+```
+#### cache1 과 다른점들
+1. 2-Way set associative 이므로, index bit을 구할 때, 2를 추가로 나눠줬다.
+2. 2-Way set associative 이므로, 한 세트를 연속된 두 행으로 생각했다. 그래서 cache[2*index]와 cache[2*index+1]은 서로 같은 set에 포함된 주소값이다.
+
+##### 한 세트 내 두가지 cache line이 valid한 경우
+
+3. 한 세트내에서 두가지 cache line이 valid한 경우 두 cache line을 살펴보면서 tag가 일치하는지 **모두** 확인해야만 한다. 물론, 일치하는 tag가 존재하면 cache hit이므로 바로 꺼내서 lw이든 sw든 과정을 거치면 되겠지만, 둘 다 miss 할 경우에 LRU replacement 기법에 따라, 먼저 cache에 등록된 cache 정보가 교체되어야 하기 때문이다.
+4. valid한 bit을 확인 후에, 같은 tag를 가진 cache 정보가 존재한다면, valid bit을 해당 cache line이 아닌, 같은 세트 내에 존재하는 다른 cache line을 가리키게 LRU F를 조절해야한다.
+다음은 해당 부분의 예시이다.
+```c
+if(cache2[2*index][3] == tag)
+{
+    hit->hitN++;
+    cache2[2*index+1][0] = 1;
+    cache2[2*index][0] = 1;
+}
+ ```
+
+ 
+ 5. 두가지 cache line에서 miss 가 발생할 경우, LRU bit가 가리키는 cache line을 교체해야 한다. 바꿀 때에는 dirty bit을 1로 고쳐서 write-back을 구현할 수 있게 하고, LRU bit 또한 반대쪽 cache line을 가리키게 바꾼다.
+ ```c
+else //miss 가 발생한 경우
+    {
+        hit->missN++;
+        cache2[2*index+cache2[2*index][0]][2] = 1; //해당 LRU에 해당하는 것을 replace하기위해 해당 index cache line을 dirty bit으로 교체  
+        cache2[2*index+cache2[2*index][0]][3] = tag; //tag replacement 해당 lru. data는 신경x
+        if(cache2[2*index][0] ==0) //lru가 0인경우 1로 변화
+        {
+            cache2[2*index][0] = 1;
+            cache2[2*index+1][0] = 1;
+        }
+        else
+        {
+            cache2[2*index][0] = 0;
+            cache2[2*index+1][0] = 0;
+        }
+
+    }
+```
+
+##### 한 세트 내에서 한가지 cache line만 valid 한 경우 
+
+6. 항상 2의 배수에 해당하는 행부터 lw 와 sw 정보를 참조했다, 따라서, 만일, 둘다 valid한 경우가 아니라면, 항상 2\*index 행이 먼저 valid하다.
+```c
+else if(cache2[2*index][1] ==1)//둘중하나만 valid한 경우 그중 첫번째가 valid (내가 이렇게 설정함. 무조건 첫번쨰거먼저 replace)
+{
+    if(cache2[2*index][3]==tag)
+    {
+       hit->hitN++;
+       cache2[2*index+1][0] = 1;
+       cache2[2*index][0] = 1;
+    }
+    else //valid하지 않은 cacheline에 memory 저장
+    {
+        hit->missN++;
+        cache2[2*index+1][1] = 1;
+        cache2[2*index+1][2] = 1;
+        cache2[2*index+1][3] = tag;
+        cache2[2*index][0] = 0; //lru 변화
+        cache2[2*index+1][0] = 0; //lru변화
+    }
+}
+```
+
+##### 두가지 모두 invalid한 경우 (아무것도 들어와 있지 않음)
+```c
+else//둘다 invalid
+{
+    hit->missN++;
+    cache2[2*index][0] = 1;
+    cache2[2*index+1][0] = 1;
+    cache2[2*index][1] = 1; //valid하게 바꿈
+    cache2[2*index][2] = 1; //dirty bit
+    cache2[2*index][3] = tag;
+}
+```
+다음과 같이 cache에 아무것도 저장되어 있지 않다면, 2\*index 행부터 valid하게 바꾸었다.
+
+sw instruction만 요약했지만, lw instruction 또한 같은 과정이므로 생략하겠다.
+
+
+## 아쉬운 점
+3차 과제에서 몇십만개의 data 와 instruction을 처리하는데, 시간이 많이 걸렸었다.
